@@ -35,6 +35,10 @@ function checkBlobConfigured() {
   }
 }
 
+/* Blob Store 的访问类型需与创建时一致 (Private 默认).
+   若你在 Vercel 里建的是 Public Store, 设环境变量 BLOB_ACCESS=public 即可. */
+const BLOB_ACCESS = process.env.BLOB_ACCESS === "public" ? "public" : "private";
+
 function newEnv(meta) {
   if (meta.game === "go") {
     return new globalThis.GoEnv({
@@ -55,6 +59,10 @@ function replay(meta, moves) {
 
 async function readText(blob) {
   if (blob && typeof blob.text === "function") { return blob.text(); }
+  if (blob && typeof blob.url === "string") {   // 私有存储: 经签名 URL 取内容
+    const res = await fetch(blob.url);
+    return res.text();
+  }
   return String(blob && blob.body != null ? blob.body : "");
 }
 
@@ -77,7 +85,7 @@ async function loadPresence(code) {
 async function saveRoom(state) {
   checkBlobConfigured();
   await put(roomPath(state.code), JSON.stringify(state), {
-    access: "public",
+    access: BLOB_ACCESS,
     addRandomSuffix: false,
     contentType: "application/json"
   });
@@ -85,7 +93,7 @@ async function saveRoom(state) {
 
 async function savePresence(code, presence) {
   await put(presencePath(code), JSON.stringify(presence), {
-    access: "public",
+    access: BLOB_ACCESS,
     addRandomSuffix: false,
     contentType: "application/json"
   });

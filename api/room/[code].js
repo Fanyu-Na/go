@@ -28,12 +28,21 @@ export default async function handler(req, res) {
     try {
       state = await lib.loadRoom(code);
     } catch (e) {
+      console.error("[api/room/" + code + "] 读取房间失败:",
+        e && e.name ? e.name + ": " + e.message : e);
       if (!process.env.BLOB_READ_WRITE_TOKEN) {
         return lib.json(res, 500, {
           error: "未连接 Blob 存储：请在 Vercel 项目 → Storage 里关联一个 Blob Store（见 README），重新部署即可联机"
         });
       }
-      return lib.json(res, 404, { error: "房间不存在或已关闭" });
+      const notFound = e && (e.name === "BlobNotFoundError" ||
+        /not found|does not exist|no blob/i.test(String(e && e.message || "")));
+      if (notFound) { return lib.json(res, 404, { error: "房间不存在或已关闭" }); }
+      /* 其他读取错误 (权限/内容损坏等) 如实返回, 便于定位 */
+      return lib.json(res, 500, {
+        error: "读取房间失败: " + (e && e.message ? e.message : "未知"),
+        errName: e && e.name ? e.name : "unknown"
+      });
     }
 
     const body = lib.parseBody(req);
