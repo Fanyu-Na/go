@@ -230,4 +230,4 @@
   };
 
   global.GoEnv = GoEnv;
-})(window);
+})(typeof window !== "undefined" ? window : globalThis);

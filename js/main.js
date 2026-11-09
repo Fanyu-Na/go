@@ -42,13 +42,16 @@
     this.boardCanvas = null;
     this.menu = null;
     /* 联机相关 */
-    this.net = null;             // Online.Net 实例, null = 本地对局
+    this.net = null;             // Online.RelayClient 实例, null = 本地对局
     this.myColor = BLACK;        // 联机中我方执子
-    this.netStarted = false;     // 客机: 是否已收到首份棋局状态
+    this.netStarted = false;     // 联机: 是否已应用过服务器棋局状态
     this.netReq = null;          // undo | restart, 等待对方应答的请求
     this.lobby = null;           // Online.LobbyUI 实例
     this.lobbySettings = null;   // 大厅对应的棋种/路数
     this.roomCode = null;
+    this._lastVersion = 0;       // 已应用的服务器状态版本 (防旧包回放)
+    this._lastResultVersion = 0; // 已展示过的请求回执版本
+    this._reqSeenKey = "";       // 已弹过确认框的请求 (防重复弹窗)
   }
 
   /* ---------------- 对局创建与视图切换 ---------------- */
@@ -62,6 +65,9 @@
     this.myColor = settings.myColor || this.humanColor;
     this.netStarted = false;
     this.netReq = null;
+    this._lastVersion = 0;
+    this._lastResultVersion = 0;
+    this._reqSeenKey = "";
     if (this.game === "go") {
       var komi = KOMI[this.size] != null ? KOMI[this.size] : 5.5;
       this.env = new global.GoEnv({
@@ -160,17 +166,28 @@
     this.netStarted = false;
     this.netReq = null;
     this.roomCode = null;
+    this._lastVersion = 0;
+    this._lastResultVersion = 0;
+    this._reqSeenKey = "";
   };
 
   App.prototype.startHosting = function () {
     var self = this;
     this.destroyNet();
     var s = this.lobbySettings || { game: "go", size: 9 };
-    this.net = new global.Online.Net({
+    this.net = new global.Online.RelayClient({
       onEvent: function (ev) { self.onNetEvent(ev); },
-      onMessage: function (msg) { self.onNetMessage(msg); }
+      onState: function (st) { self.onRoomState(st); }
     });
-    this.net.host();
+    var komi = KOMI[s.size] != null ? KOMI[s.size] : 5.5;
+    this.net.createRoom(s.game, s.size, komi)
+      .catch(function (e) {
+        if (self.lobby) {
+          self.lobby.setError(String(e && e.message || e));
+          self.lobby.busy = false;
+          self.lobby.render();
+        }
+      });
     this.lobby.setStatus("正在创建房间", true);
   };
 
@@ -189,11 +206,16 @@
     this.lobby.setJoining(code);
     this.view = "lobby";
     this.showViews();
-    this.net = new global.Online.Net({
+    this.net = new global.Online.RelayClient({
       onEvent: function (ev) { self.onNetEvent(ev); },
-      onMessage: function (msg) { self.onNetMessage(msg); }
+      onState: function (st) { self.onRoomState(st); }
     });
-    this.net.join(code);
+    this.net.join(code, global.Online.savedToken(code))
+      .catch(function (e) {
+        if (self.net && self.net.destroyed) { return; }
+        self.onNetEvent({ type: "join-failed", message: String(e && e.message || e) });
+        if (self.net) { self.net.destroy(); }
+      });
     this.roomCode = code;
   };
 
@@ -230,53 +252,70 @@
     }
   };
 
-  /* 双方连接就绪: 房主立局并发送初始状态; 客机等 state 消息再立局.
-     若房主已有进行中的对局 (对手断线重连), 不重置棋局, 仅重新下发状态. */
-  App.prototype.onConnected = function () {
-    if (this.net.role === "host") {
-      this.roomCode = this.net.code;
-      if (!this.netStarted || !this.env) {
-        var s = this.lobbySettings || { game: "go", size: 9 };
-        this.createGame({
-          game: s.game, size: s.size, mode: "online",
-          humanColor: BLACK, myColor: BLACK, net: this.net
-        });
-        this.netStarted = true;
+  /* ---------------- 联机: 服务器状态同步 ---------------- */
+
+  /* 服务器为权威端: 双方都以轮询拿到的房间快照驱动本端棋局.
+     - 客队加入即立局; 房主等对方就座 (guestReady) 才进对局视图.
+     - version 单调递增, 过期状态直接丢弃. */
+  App.prototype.onRoomState = function (state) {
+    if (!this.net) { return; }
+    if (this.netStarted && state.version <= this._lastVersion) { return; }
+    var self = this;
+
+    if (this.view !== "game") {
+      if (this.net.color === BLACK && !state.guestReady) {
+        /* 房主刷新回到房间但对方未在: 切回等待对手界面 */
+        if (this.lobby && this.lobby.stage === "joining" && this.roomCode) {
+          this.lobby.setHosting(this.roomCode);
+        }
+        return;
       }
-      this.view = "game";
-      this.showViews();
-      this.pushState();
-    } else {
-      /* 客机: 先占位立局, 首个 state 到达后重建为正确棋种/路数 */
+      if (this.lobby) { this.lobby.hide(); this.lobby = null; }
       this.createGame({
-        game: "go", size: 9, mode: "online",
-        humanColor: WHITE, myColor: WHITE, net: this.net
+        game: state.game, size: state.size, mode: "online",
+        humanColor: this.net.color, myColor: this.net.color, net: this.net
       });
-      this.view = "game";
-      this.showViews();
-      this.flashStatus("已连接，正在同步棋局…");
+      this.netStarted = true;
+      this.flashStatus(this.net.color === BLACK ?
+        "对手已就座，对局开始" : "已加入，正在同步棋局…");
     }
-  };
 
-  /* ---------------- 联机: 状态同步 ---------------- */
+    this.applyRemoteState(state);
+    this._lastVersion = state.version;
 
-  /* 房主权威: 广播完整局面 (动作序列足够, 引擎确定性重放) */
-  App.prototype.stateMsg = function () {
-    var actions = [];
-    for (var i = 0; i < this.moves.length; i++) { actions.push(this.moves[i].action); }
-    return {
-      t: "state",
-      game: this.game,
-      size: this.size,
-      komi: this.game === "go" ? this.env.komi : null,
-      moves: actions,
-      resigned: this.resigned
-    };
-  };
+    /* 请求协商: 我发起的 -> 维持「等待应答」提示; 对方发来的 -> 弹窗 */
+    var req = state.req;
+    if (req && req.from === this.myColor) {
+      this.netReq = req.kind;
+    } else if (req && req.from !== this.myColor) {
+      var key = state.version + ":" + req.kind;
+      if (this._reqSeenKey !== key && !UI.isDialogOpen()) {
+        this._reqSeenKey = key;
+        var isUndo = req.kind === "undo";
+        UI.confirmDialog({
+          title: isUndo ? "悔棋请求" : "再来一局",
+          message: isUndo ? "对方请求悔去最后一手，是否同意？" :
+            "对方想开一局新的，是否接受？",
+          confirmText: isUndo ? "同意悔棋" : "接受"
+        }).then(function (ok) {
+          if (self.net && !self.net.destroyed) {
+            self.net.ack(ok).catch(function () { /* 状态轮询会纠正 */ });
+          }
+        });
+      }
+    }
+    if (!req) { this._reqSeenKey = ""; }
 
-  App.prototype.pushState = function () {
-    if (this.net && this.net.role === "host" && this.net.isReady()) {
-      this.net.send(this.stateMsg());
+    /* 我发起的请求被处理 -> 展示回执 (netReq 非空说明请求是我发的) */
+    if (state.reqResult && state.resultVersion > this._lastResultVersion) {
+      this._lastResultVersion = state.resultVersion;
+      if (this.netReq) {
+        this.netReq = null;
+        var k = state.reqResult.kind;
+        this.flashStatus(state.reqResult.accepted ?
+          (k === "undo" ? "对方同意了悔棋" : "对方同意了再来一局") :
+          (k === "undo" ? "对方拒绝了悔棋请求" : "对方拒绝了再来一局"));
+      }
     }
   };
 
@@ -312,7 +351,6 @@
       });
     }
     this.netStarted = true;
-    this.netReq = null;
     this.version += 1;
     this.replaying = false;
     this.aiBusy = false;
@@ -345,15 +383,19 @@
   /* ---------------- 联机: 网络事件 / 消息协议 ---------------- */
 
   App.prototype.onNetEvent = function (ev) {
-    var self = this;
     switch (ev.type) {
       case "waiting":
+      case "joined":
         this.roomCode = ev.code;
-        if (this.lobby) { this.lobby.setHosting(ev.code); }
-        break;
-      case "connected":
-        if (this.lobby) { this.lobby.hide(); this.lobby = null; }
-        this.onConnected();
+        global.Online.rememberToken(ev.code, this.net.token);
+        /* 地址栏带上房间码: 刷新页面自动回到本房间并认回原席位 */
+        try {
+          history.replaceState(null, "",
+            location.pathname + "?room=" + ev.code);
+        } catch (err) { /* file:// 等环境忽略 */ }
+        if (ev.type === "waiting" && this.lobby) {
+          this.lobby.setHosting(ev.code);
+        }
         break;
       case "join-failed":
         this.destroyNet();
@@ -368,11 +410,11 @@
       case "closed":
         this.netReq = null;
         if (this.lobby) {
-          this.lobby.setError("连接已断开，请重试");
+          this.lobby.setError("房间已关闭或不存在，请重试");
           this.lobby.busy = false;
           this.lobby.render();
         } else if (this.view === "game" && this.net) {
-          this.flashStatus("对方已断线");
+          this.flashStatus("对方已关闭房间");
           this.renderSidebar();
         }
         break;
@@ -391,136 +433,20 @@
     }
   };
 
-  App.prototype.guestColor = function () { return 3 - this.myColor; };
-
-  App.prototype.onNetMessage = function (msg) {
-    if (!this.net) { return; }
-    var self = this;
-    switch (msg.t) {
-      case "state":
-        if (this.view === "game") { this.applyRemoteState(msg); }
-        break;
-
-      /* ---- 以下仅房主处理 (权威端) ---- */
-      case "act":
-        if (this.net.role !== "host" || this.env.done ||
-            this.resigned != null) { break; }
-        if (this.env.toPlay !== this.guestColor()) { break; }
-        if (!this.env.isLegal(msg.a)) { break; }
-        this.applyMove(msg.a);
-        this.pushState();
-        break;
-      case "resign":
-        if (this.net.role !== "host" || this.resigned != null || this.env.done) {
-          break;
-        }
-        this.resigned = this.guestColor();
-        this.clockPause();
-        Sound.play("end");
-        this.pushState();
-        this.renderSidebar();
-        break;
-      case "undo-req":
-        if (this.netReq || !this.moves.length || this.resigned != null) { break; }
-        UI.confirmDialog({
-          title: "悔棋请求",
-          message: "对方请求悔去最后一手，是否同意？",
-          confirmText: "同意悔棋"
-        }).then(function (ok) {
-          if (!self.net || self.netReq) { return; }
-          if (ok) {
-            if (self.net.role === "host") {
-              self.undoCore();
-              self.pushState();
-            } else {
-              self.net.send({ t: "req-ok", kind: "undo" });
-            }
-          } else {
-            self.net.send({ t: "req-no", kind: "undo" });
-          }
-        });
-        break;
-      case "restart-req":
-        if (this.netReq) { break; }
-        UI.confirmDialog({
-          title: "再来一局",
-          message: "对方想开一局新的，是否接受？",
-          confirmText: "接受"
-        }).then(function (ok) {
-          if (!self.net || self.netReq) { return; }
-          if (ok) {
-            if (self.net.role === "host") {
-              self.resetOnlineGame();
-            } else {
-              self.net.send({ t: "req-ok", kind: "restart" });
-            }
-          } else {
-            self.net.send({ t: "req-no", kind: "restart" });
-          }
-        });
-        break;
-
-      /* ---- 以下仅房主消费 (客机同意后回执) ---- */
-      case "req-ok":
-        if (this.net.role !== "host") { break; }
-        if (msg.kind === "undo" && this.moves.length && this.resigned == null) {
-          this.undoCore();
-          this.pushState();
-        } else if (msg.kind === "restart") {
-          this.resetOnlineGame();
-        }
-        break;
-
-      /* ---- 双方都可能收到 (己方请求被拒) ---- */
-      case "req-no":
-        this.netReq = null;
-        this.flashStatus(msg.kind === "undo" ? "对方拒绝了悔棋请求" : "对方拒绝了再来一局");
-        break;
-    }
-  };
-
-  /* 悔棋核心 (仅联动在线/本地 pvp): 弹出最后一手并回到该局面 */
-  App.prototype.undoCore = function () {
-    if (this.history.length <= 1) { return; }
-    this.version += 1;
-    this.aiBusy = false;
-    this.history.pop();
-    this.moves.pop();
-    this.env = this.history[this.history.length - 1].copy();
-    this.prediction = null;
-    this.scoreMode = false;
-    this.territory = null;
-    this.hover = null;
-    this.netReq = null;
-    this.clockResume();
-    this.renderSidebar();
-  };
-
-  /* 房主: 以相同设置开新局并广播 (再来一局的执行端) */
-  App.prototype.resetOnlineGame = function () {
-    if (!this.net) { return; }
-    this.createGame({
-      game: this.game, size: this.size, mode: "online",
-      humanColor: this.myColor, myColor: this.myColor, net: this.net
-    });
-    this.netStarted = true;
-    this.netReq = null;
-    this.pushState();
-    this.renderSidebar();
-  };
-
-  /* 客机断线重连: 用原房间码重新加入, 房主会重新下发完整局面 */
+  /* 断线重连: 凭会话里保存的席位 token 认回原席位并继续同步.
+     棋局状态存于服务器, 重连即恢复整局, 与哪端先掉线无关. */
   App.prototype.reconnectOnline = function () {
     if (!this.roomCode) { return; }
     var code = this.roomCode;
     var self = this;
     this.destroyNet();
-    this.net = new global.Online.Net({
+    this.net = new global.Online.RelayClient({
       onEvent: function (ev) { self.onNetEvent(ev); },
-      onMessage: function (msg) { self.onNetMessage(msg); }
+      onState: function (st) { self.onRoomState(st); }
     });
     this.roomCode = code;
-    this.net.join(code);
+    this.net.join(code, global.Online.savedToken(code))
+      .catch(function () { /* join-failed 事件已处理提示 */ });
     this.flashStatus("正在重连…");
   };
 
@@ -585,7 +511,6 @@
     } else if (!(this.game === "go" && action === env.passAction)) {
       Sound.play("stone");
     }
-    this.pushState();               // 联机房主: 每次变更广播完整局面
     this.renderSidebar();
   };
 
@@ -601,11 +526,10 @@
           "此处不能落子（禁着点或已被占用）" : "此处已有棋子");
         return;
       }
-      if (this.net.role === "host") {
-        this.applyMove(action);     // applyMove 内部已 pushState
-      } else {
-        this.net.send({ t: "act", a: action });   // 交房主校验并执行
-      }
+      var self = this;
+      this.net.move(action).catch(function (e) {
+        self.flashStatus(String((e && e.message) || "落子失败，请重试"));
+      });
       return;
     }
     if (this.mode === "ai" && this.env.toPlay !== this.humanColor) { return; }
@@ -686,11 +610,10 @@
   App.prototype.pass = function () {
     if (this.game !== "go" || !this.canPlay()) { return; }
     if (this.net) {
-      if (this.net.role === "host") {
-        this.applyMove(this.env.passAction);
-      } else {
-        this.net.send({ t: "act", a: this.env.passAction });
-      }
+      var selfNet = this;
+      this.net.move(this.env.passAction).catch(function (e) {
+        selfNet.flashStatus(String((e && e.message) || "操作失败，请重试"));
+      });
       return;
     }
     if (this.mode === "ai" && this.env.toPlay !== this.humanColor) { return; }
@@ -703,7 +626,7 @@
         UI.isDialogOpen()) {
       return;
     }
-    /* 联机: 悔棋需对方同意 (undo-req / req-ok 协商) */
+    /* 联机: 悔棋需对方同意 (req / ack 协商, 服务器裁决) */
     if (this.net) {
       var self = this;
       if (this.resigned != null || !this.moves.length ||
@@ -718,8 +641,7 @@
         if (!ok || !self.net || !self.net.isReady() || self.netReq != null) {
           return;
         }
-        self.netReq = "undo";
-        self.net.send({ t: "undo-req" });
+        self.net.req("undo").catch(function () { /* 状态轮询会纠正 */ });
         self.renderSidebar();
       });
       return;
@@ -791,7 +713,7 @@
 
   App.prototype.resign = function () {
     if (!this.canPlay()) { return; }
-    /* 联机: 只能认自己的输; 房主直接生效并广播, 客机发送请求并以状态回执为准 */
+    /* 联机: 认输上报服务器, 以状态回执为准 */
     if (this.net) {
       var selfNet = this;
       UI.confirmDialog({
@@ -801,12 +723,9 @@
         danger: true
       }).then(function (ok) {
         if (!ok || !selfNet.net || selfNet.resigned != null) { return; }
-        selfNet.resigned = selfNet.myColor;
-        selfNet.clockPause();
-        Sound.play("end");
-        selfNet.net.send({ t: "resign" });
-        selfNet.pushState();
-        selfNet.renderSidebar();
+        selfNet.net.resign().catch(function (e) {
+          selfNet.flashStatus(String((e && e.message) || "操作失败，请重试"));
+        });
       });
       return;
     }
@@ -831,7 +750,7 @@
   App.prototype.confirmNew = function () {
     if (this.view !== "game" || UI.isDialogOpen()) { return; }
     var self = this;
-    /* 联机: 开新局需对方同意 (restart-req / req-ok 协商) */
+    /* 联机: 开新局需对方同意 (req / ack 协商, 服务器裁决) */
     if (this.net) {
       if (this.netReq != null || !this.net.isReady()) { return; }
       UI.confirmDialog({
@@ -842,8 +761,7 @@
         if (!ok || !self.net || !self.net.isReady() || self.netReq != null) {
           return;
         }
-        self.netReq = "restart";
-        self.net.send({ t: "restart-req" });
+        self.net.req("restart").catch(function () { /* 状态轮询会纠正 */ });
         self.renderSidebar();
       });
       return;
@@ -994,12 +912,14 @@
     if (this.net) {
       UI.confirmDialog({
         title: "断开联机",
-        message: "断开与对方的连接并返回主菜单吗？",
+        message: "断开并关闭房间，返回主菜单吗？对方将看到房间已关闭。",
         confirmText: "断开"
       }).then(function (ok) {
         if (ok) {
+          self.net.close();       // 通知服务器删除房间
           self.destroyNet();
           self.showMenu();
+          try { history.replaceState(null, "", location.pathname); } catch (err) { /* 忽略 */ }
         }
       });
       return;
@@ -1071,9 +991,9 @@
         if (this.netReq) {
           second = this.netReq === "undo" ? "悔棋请求待对方应答…" : "开新局请求待对方应答…";
         } else if (!this.net.isReady()) {
-          second = "对方已断线";
+          second = "对方已关闭房间";
         } else if (!this.net.alive) {
-          second = "对方连接不稳定…";
+          second = "对方离线中…（棋局已保存，可继续落子）";
         }
       } else if (this.mode === "ai" && toPlay === this.humanColor) {
         first = "轮到你落子（" + (toPlay === BLACK ? "黑" : "白") + "）";
@@ -1191,8 +1111,8 @@
     html += '<div class="player-cards">' + pcard(BLACK) + pcard(WHITE) + "</div>";
     if (this.net) {
       var pillCls = !this.net.isReady() ? "bad" : (this.net.alive ? "ok" : "warn");
-      var pillText = !this.net.isReady() ? "对方已断线" :
-        (this.net.alive ? "对方在线 · 点对点直连" : "对方连接不稳定…");
+      var pillText = !this.net.isReady() ? "对方已关闭房间" :
+        (this.net.alive ? "对方在线 · 服务器中继" : "对方离线 · 棋局已保存");
       html += '<div class="net-pill ' + pillCls + '"><span class="np-dot"></span>' +
         pillText + "</div>";
     }
@@ -1350,12 +1270,10 @@
     });
 
     window.addEventListener("beforeunload", function (e) {
-      /* 联机: 尽力通知对方即将离开, 让其立刻看到断线而不是等超时 */
-      if (app.net && app.net.isReady()) {
-        try { app.net.send({ t: "bye" }); } catch (err) { /* 忽略 */ }
-      }
-      if (app.view === "game" && app.env && app.moves.length && !app.env.done &&
-          app.resigned == null) {
+      /* 联机中刷新/关闭只作提醒: 棋局存在服务器, 凭 ?room= 链接和
+         会话 token 刷新后可无缝认回席位继续下 */
+      if (app.view === "game" && app.net && app.env && app.moves.length &&
+          !app.env.done && app.resigned == null) {
         e.preventDefault();
         e.returnValue = "";
       }

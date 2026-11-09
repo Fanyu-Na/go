@@ -83,4 +83,4 @@
   };
 
   global.GomokuEnv = GomokuEnv;
-})(window);
+})(typeof window !== "undefined" ? window : globalThis);

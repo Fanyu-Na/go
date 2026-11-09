@@ -1,0 +1,8 @@
+{
+  "name": "go-gomoku-web",
+  "private": true,
+  "description": "围棋 · 五子棋 纯静态网页 + Vercel Functions 联机中继",
+  "dependencies": {
+    "@vercel/blob": "latest"
+  }
+}

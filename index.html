@@ -29,14 +29,11 @@
 <div id="modal-root"></div>
 
 <!--
-  纯静态页面, 直接双击打开即可; 全部脚本为普通 (非 module) 脚本,
-  按 file:// 协议也能正常加载. 加载顺序不可调换.
-  联机: 信令走公共 MQTT broker (EMQX, 大陆可达快), 棋局数据 WebRTC 点对点;
-  MQTT.js 从 CDN 加载, 主源失败自动回退备用源. 若所有 CDN 都不可达,
-  本地双人/人机对局不受影响, 仅联机入口提示错误.
+  纯静态页面, 本地双人/人机对局直接双击打开即可; 全部脚本为普通 (非 module)
+  脚本, 加载顺序不可调换.
+  联机: 经 Vercel Functions + Blob 服务器中继 (api/ 目录), HTTPS 轮询同步,
+  任何网络环境都能加入; 因此联机功能需部署后 (HTTP 环境) 使用.
 -->
-<script src="https://gcore.jsdelivr.net/npm/mqtt@4/dist/mqtt.min.js"
-  onerror="var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/mqtt@4/dist/mqtt.min.js';s.onerror=function(){var t=document.createElement('script');t.src='https://unpkg.com/mqtt@4/dist/mqtt.min.js';document.head.appendChild(t);};document.head.appendChild(s);"></script>
 <script src="js/sound.js"></script>
 <script src="js/go_env.js"></script>
 <script src="js/gomoku_env.js"></script>
