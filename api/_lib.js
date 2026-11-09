@@ -7,7 +7,7 @@
    动作序列校验着法, 天然防作弊. */
 
 import crypto from "node:crypto";
-import { put, get, del } from "@vercel/blob";
+import { put, get, del, head } from "@vercel/blob";
 import "../js/go_env.js";
 import "../js/gomoku_env.js";
 
@@ -77,47 +77,63 @@ function replay(meta, moves) {
   return env;
 }
 
-async function readText(blob) {
-  if (blob && typeof blob.text === "function") { return blob.text(); }
-  if (blob && typeof blob.url === "string") {   // 私有存储: 经签名 URL 取内容
-    const res = await fetch(blob.url);
-    return res.text();
-  }
-  return String(blob && blob.body != null ? blob.body : "");
+/* 从 Blob 结果对象里取出文本; 单种形态失败返回 "" 由上层换下一种 */
+async function textOf(blob) {
+  try {
+    if (typeof blob === "string") {              // 极少数版本直接返回 URL
+      const res = await fetch(blob);
+      return await res.text();
+    }
+    if (blob && typeof blob.text === "function") {
+      const t = await blob.text();
+      if (t && String(t).trim()) { return String(t); }
+    }
+    if (blob && typeof blob.url === "string") {  // 经 (签名/公有) URL 取内容
+      const res = await fetch(blob.url);
+      return await res.text();
+    }
+    if (blob && typeof blob.body === "string") { return blob.body; }
+  } catch (e) { /* 落到空串 */ }
+  return "";
 }
 
-/* 兼容不同版本的 @vercel/blob: 新版要求 get() 携带 options.
-   依次尝试: 无参数 -> 按 put 成功时记住的访问类型 -> 另一种类型.
-   「形态不符」类错误才换下一种; 房间不存在 (BlobNotFoundError) 直接抛. */
-async function getBlob(pathname) {
-  const other = _blobAccess === "public" ? "private" : "public";
+/* 读取 Blob 文本, 兼容各版本 SDK 的返回形态与必填参数:
+   1) get(path) 无参 → 2) get(path, {access: 已记住的类型}) → 3) head(path)+fetch.
+   每种形态会打到 Vercel Logs, 便于定位. 房间不存在 (BlobNotFoundError) 直接抛. */
+async function readBlobText(pathname) {
   const tries = [
     function () { return get(pathname); },
     function () { return get(pathname, { access: _blobAccess }); },
-    function () { return get(pathname, { access: other }); }
+    function () { return head(pathname); }
   ];
   let lastErr = null;
   for (let i = 0; i < tries.length; i++) {
+    let blob = null;
     try {
-      return await tries[i]();
+      blob = await tries[i]();
     } catch (e) {
       lastErr = e;
       if (!/missing options|access/i.test(String(e && e.message || ""))) { throw e; }
+      continue;
     }
+    console.log("[blob] 读取", pathname, "形态" + i + ":",
+      blob === null || blob === undefined ? String(blob) :
+        (typeof blob === "string" ? "url-string" : Object.keys(blob).join(",")));
+    const raw = await textOf(blob);
+    if (raw && raw.trim()) { return raw; }
+    lastErr = new Error("读取 " + pathname + " 内容为空 (形态 " + i + ")");
   }
   throw lastErr;
 }
 
 async function loadRoom(code) {
   checkBlobConfigured();
-  const blob = await getBlob(roomPath(code));
-  return JSON.parse(await readText(blob));
+  return JSON.parse(await readBlobText(roomPath(code)));
 }
 
 async function loadPresence(code) {
   try {
-    const blob = await getBlob(presencePath(code));
-    const p = JSON.parse(await readText(blob));
+    const p = JSON.parse(await readBlobText(presencePath(code)));
     return p && typeof p === "object" ? p : {};
   } catch (e) {
     return {};      // 无心跳文件 = 双方都还没活动过
