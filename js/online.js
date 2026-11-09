@@ -1,21 +1,51 @@
-/* 联机对战模块: WebRTC 点对点 (PeerJS) + 联机大厅界面.
-   无需自建后端: 建房/寻址走 PeerJS 公共信令服务器, 棋局数据
-   通过 P2P DataConnection 直传; 房主机为权威端, 每次变更广播
-   {t:"state"} 完整局面, 客机重放动作序列保持一致.
-   仅依赖浏览器 API 与 PeerJS, 任意静态托管 (含 Vercel) 可用. */
+/* 联机对战模块: 信令走公共 MQTT broker (EMQX, 大陆访问快) + WebRTC 点对点直传
+   + 联机大厅界面. 无需自建后端, 任意静态托管 (含 Vercel) 可用.
+   - 信令: 双方订阅同一 MQTT 主题交换 SDP (offer/answer), 采用非 trickle ICE:
+     候选收集完毕后一次性互发完整 SDP, 免去逐条 candidate 转发, 握手往返最少.
+   - 棋局: RTCPeerConnection DataChannel 直传 JSON, 不经过任何服务器.
+   - 房主机为权威端, 每次变更广播 {t:"state"} 完整局面 (见 main.js). */
 
 (function (global) {
   "use strict";
 
-  /* PeerJS 公共信令服务器上的 id 命名空间, 避免与其它应用撞号 */
-  var NS = "go-gomoku-web-v2-";
   /* 房间码字符表: 去掉 0/O/1/I/L 等易混字符 */
   var ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
   var CODE_LEN = 5;
+
+  /* 信令节点按序尝试 (超时自动换下一个). 双方必须落在同一节点才能握手,
+     因此两端使用完全相同的尝试顺序; 首选大陆可达的 EMQX 节点. */
+  var SIGNAL_SERVERS = [
+    "wss://broker-cn.emqx.io:8084/mqtt",
+    "wss://broker.emqx.io:8084/mqtt",
+    "wss://test.mosquitto.org:8081/mqtt"
+  ];
+  var TOPIC_ROOT = "go-gomoku-web-v3";
+  var SERVER_TIMEOUT_MS = 7000;      // 单个信令节点连接超时
+  var HANDSHAKE_TIMEOUT_MS = 12000;  // 加入 -> 数据通道打通的总时限
+  var GATHER_TIMEOUT_MS = 2500;      // ICE 候选收集兜底时限
   var HEARTBEAT_MS = 4000;
   var STALE_MS = 15000;
 
-  function peerAvailable() { return typeof global.Peer === "function"; }
+  /* STUN 选大陆可达的公共节点 (Google STUN 在大陆不可达, 会拖慢探测) */
+  function rtcConfig() {
+    return {
+      iceServers: [
+        { urls: "stun:stun.miwifi.com:3478" },
+        { urls: "stun:stun.cloudflare.com:3478" }
+      ]
+    };
+  }
+
+  function libAvailable() {
+    return !!(global.mqtt && typeof global.mqtt.connect === "function");
+  }
+
+  function decodePayload(p) {
+    try {
+      if (global.TextDecoder) { return new TextDecoder().decode(p); }
+    } catch (e) { /* 退化到 toString */ }
+    return String(p);
+  }
 
   function genCode() {
     var s = "";
@@ -27,174 +57,315 @@
 
   function friendlyError(type) {
     switch (type) {
-      case "browser-incompatible": return "当前浏览器不支持 WebRTC 联机";
-      case "network": return "无法连接信令服务器，请检查网络后重试";
-      case "server-error": return "信令服务器暂时不可用，请稍后重试";
-      case "socket-error": return "信令连接中断，请重试";
-      case "socket-closed": return "信令连接被关闭，请重试";
-      case "peer-unavailable": return "未找到该房间，请确认房间码或等待房主在线";
-      case "unavailable-id": return "房间码冲突，正在换码重试…";
-      case "webrtc": return "WebRTC 连接失败，可能是当前网络不支持点对点直连";
+      case "lib": return "联机组件 (MQTT.js) 加载失败，请检查网络后刷新页面";
+      case "signal": return "无法连接信令节点，请检查网络后重试";
+      case "no-host": return "未找到该房间：请确认房间码，且房主页面保持打开";
+      case "webrtc": return "直连建立失败：当前网络可能不支持点对点连接，请换网络重试";
       default: return "联机出现错误（" + type + "）";
     }
   }
 
-  /* ---------------- Net: PeerJS 封装 ----------------
-     事件 (onEvent): waiting / connected / closed / error / peer-alive
-     消息 (onMessage): 对方发来的业务消息 {t: ...} */
+  /* ---------------- Net: 信令 + WebRTC 封装 ----------------
+     对外接口与事件与旧版一致, main.js 无感知:
+     事件 (onEvent): waiting / connected / closed / error / join-failed / peer-alive
+     消息 (onMessage): 对方经数据通道发来的业务消息 {t: ...} */
 
   function Net(opts) {
     opts = opts || {};
     this.role = null;            // host | guest
     this.code = null;
-    this.peer = null;
-    this.conn = null;
+    this.topic = null;
+    this.myId = TOPIC_ROOT + "-" + Math.random().toString(36).slice(2, 10);
+    this.client = null;          // MQTT 信令客户端
+    this.pc = null;              // RTCPeerConnection
+    this.dc = null;              // DataChannel
     this.alive = true;           // 心跳判定: 对方是否响应
     this.destroyed = false;
     this.onEvent = opts.onEvent || function () {};
     this.onMessage = opts.onMessage || function () {};
+    this._serverIdx = 0;
+    this._everUp = false;        // 信令是否连上过 (区分首连失败与闪断)
+    this._falling = false;       // 正在切换信令节点
+    this._guestId = null;        // 房主: 当前握手中的 guest id
+    this._answered = false;      // 房主: 已收到 answer, 忽略重复
+    this._joinSends = 0;         // 客机: join 重发计数
+    this._lastSeen = 0;
     this._hbTimer = null;
     this._checkTimer = null;
-    this._lastSeen = 0;
+    this._watchTimer = null;
+    this._joinTimer = null;
   }
 
   Net.prototype.isReady = function () {
-    return !this.destroyed && !!this.conn && this.conn.open === true;
+    return !this.destroyed && !!this.dc && this.dc.readyState === "open";
   };
 
   Net.prototype.send = function (msg) {
     if (this.isReady()) {
-      try { this.conn.send(msg); } catch (e) { /* 通道正在关闭, 忽略 */ }
+      try { this.dc.send(JSON.stringify(msg)); } catch (e) { /* 通道正在关闭 */ }
     }
   };
 
   Net.prototype.host = function () {
     this.role = "host";
-    this._dial(genCode(), 0);
+    this._begin(genCode(), 0);
   };
 
   Net.prototype.join = function (code) {
     this.role = "guest";
     this.code = code;
-    this._connectGuest(code, 0);
+    this._begin(code, 0);
   };
 
-  /* 房主: 注册以房间码为 id 的 Peer; id 撞号则自动换码重试 */
-  Net.prototype._dial = function (code, attempt) {
+  /* 连接信令节点; 首连失败自动换下一个节点 */
+  Net.prototype._begin = function (code, serverIdx) {
     var self = this;
     if (this.destroyed) { return; }
-    if (!peerAvailable()) {
-      this.onEvent({ type: "error",
-        message: "联机组件 (PeerJS) 加载失败，请检查网络后刷新页面" });
+    if (!libAvailable()) {
+      this.onEvent({ type: "error", message: friendlyError("lib") });
       return;
     }
     this.code = code;
-    var peer = new global.Peer(NS + code, {
-      debug: 0,
-      config: {
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:stun.cloudflare.com:3478" }
-        ]
+    this.topic = TOPIC_ROOT + "/" + code + "/r";
+    this._serverIdx = serverIdx;
+    this._falling = false;
+    clearTimeout(this._watchTimer);
+    this._watchTimer = setTimeout(function () {
+      self._onHandshakeTimeout();
+    }, HANDSHAKE_TIMEOUT_MS);
+
+    var client = global.mqtt.connect(SIGNAL_SERVERS[serverIdx], {
+      clientId: TOPIC_ROOT + "-c-" + Math.random().toString(36).slice(2, 12),
+      keepalive: 30,
+      clean: true,
+      connectTimeout: SERVER_TIMEOUT_MS,
+      reconnectPeriod: 2000
+    });
+    this.client = client;
+    client.on("connect", function () { self._onSignalUp(); });
+    client.on("message", function (topic, payload) {
+      self._onSignal(topic, payload);
+    });
+    client.on("error", function () { self._onSignalDown(); });
+    client.on("close", function () { self._onSignalDown(); });
+  };
+
+  Net.prototype._onSignalUp = function () {
+    var self = this;
+    if (this.destroyed || !this.client) { return; }
+    this._everUp = true;
+    this.client.subscribe(this.topic, { qos: 0 }, function (err) {
+      if (err || self.destroyed || !self.client) { return; }
+      if (self.role === "host") {
+        clearTimeout(self._watchTimer);   // 房主就绪, 不再受握手总时限约束
+        self.onEvent({ type: "waiting", code: self.code });
+      } else {
+        self._startJoining();
       }
-    });
-    this.peer = peer;
-    peer.on("open", function () {
-      if (!self.destroyed) { self.onEvent({ type: "waiting", code: self.code }); }
-    });
-    peer.on("connection", function (conn) { self._accept(conn); });
-    peer.on("disconnected", function () {
-      if (!self.destroyed && self.peer) { self.peer.reconnect(); }
-    });
-    peer.on("error", function (err) {
-      if (self.destroyed) { return; }
-      if (err.type === "unavailable-id" && attempt < 4) {
-        peer.destroy();
-        self._dial(genCode(), attempt + 1);
-        return;
-      }
-      self.onEvent({ type: "error", message: friendlyError(err.type) });
     });
   };
 
-  /* 客机: 匿名 Peer + 连到房主的 id */
-  Net.prototype._connectGuest = function (code, attempt) {
+  /* 信令断开: 首连失败 -> 换下一个节点; 已连上后的闪断交由 mqtt.js
+     自动重连 (数据通道不受影响), 不打扰对局. */
+  Net.prototype._onSignalDown = function () {
     var self = this;
+    if (this.destroyed || this._everUp || this._falling) { return; }
+    this._falling = true;
+    if (this.client) { try { this.client.end(true); } catch (e) { /* 忽略 */ } }
+    this.client = null;
+    var next = this._serverIdx + 1;
+    if (next < SIGNAL_SERVERS.length) {
+      setTimeout(function () {
+        if (!self.destroyed) { self._begin(self.code, next); }
+      }, 300);
+    } else {
+      this.onEvent({
+        type: this.role === "guest" ? "join-failed" : "error",
+        message: friendlyError("signal")
+      });
+      this.destroy();
+    }
+  };
+
+  /* 客机: 发 join, 短暂无响应则重发 (最多 3 次) */
+  Net.prototype._startJoining = function () {
+    var self = this;
+    clearTimeout(this._joinTimer);
+    this._joinSends = 0;
+    var tryJoin = function () {
+      if (self.destroyed || self.pc) { return; }
+      self._joinSends += 1;
+      self._pub({ t: "join", from: self.myId });
+      if (self._joinSends < 3) {
+        self._joinTimer = setTimeout(tryJoin, 4000);
+      }
+    };
+    tryJoin();
+  };
+
+  Net.prototype._pub = function (msg) {
+    if (this.client && this.client.connected) {
+      try {
+        this.client.publish(this.topic, JSON.stringify(msg), { qos: 0 });
+      } catch (e) { /* 信令瞬断, 重发机制兜底 */ }
+    }
+  };
+
+  Net.prototype._onSignal = function (topic, payload) {
+    if (this.destroyed || topic !== this.topic) { return; }
+    var msg;
+    try { msg = JSON.parse(decodePayload(payload)); } catch (e) { return; }
+    if (!msg || typeof msg.t !== "string") { return; }
+    if (msg.from === this.myId) { return; }
+    if (msg.to && msg.to !== this.myId) { return; }
+    switch (msg.t) {
+      case "join":
+        if (this.role === "host") { this._onGuestJoin(msg.from); }
+        break;
+      case "offer":
+        if (this.role === "guest") { this._onOffer(msg); }
+        break;
+      case "answer":
+        if (this.role === "host") { this._onAnswer(msg); }
+        break;
+      case "bye":
+        this._peerDown();
+        break;
+    }
+  };
+
+  /* 房主: 收到 join -> 与该 guest 握手. 同一 guest 的重发 join 忽略;
+     不同 guest (对手刷新重连 / 新对手) 则拆掉旧连接重新握手. */
+  Net.prototype._onGuestJoin = function (fromId) {
     if (this.destroyed) { return; }
-    if (!peerAvailable()) {
-      this.onEvent({ type: "error",
-        message: "联机组件 (PeerJS) 加载失败，请检查网络后刷新页面" });
-      return;
-    }
-    var peer = new global.Peer({
-      debug: 0,
-      config: {
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:stun.cloudflare.com:3478" }
-        ]
-      }
-    });
-    this.peer = peer;
-    peer.on("open", function () {
-      if (self.destroyed) { return; }
-      var conn = peer.connect(NS + code, { reliable: true });
-      self._accept(conn);
-    });
-    peer.on("disconnected", function () {
-      if (!self.destroyed && self.peer) { self.peer.reconnect(); }
-    });
-    peer.on("error", function (err) {
-      if (self.destroyed) { return; }
-      if (err.type === "peer-unavailable") {
-        self.onEvent({ type: "join-failed", message: friendlyError(err.type) });
-        self.destroy();          // 回到可重新发起状态
-        return;
-      }
-      if (attempt < 2 && (err.type === "network" || err.type === "socket-error" ||
-          err.type === "socket-closed")) {
-        peer.destroy();
-        self._connectGuest(code, attempt + 1);
-        return;
-      }
-      self.onEvent({ type: "error", message: friendlyError(err.type) });
-    });
+    if (this._guestId === fromId && this.pc) { return; }
+    this._guestId = fromId;
+    this._teardownPeer();
+    var self = this;
+    var pc = new RTCPeerConnection(rtcConfig());
+    this.pc = pc;
+    this._answered = false;
+    this._bindDc(pc.createDataChannel("game", { ordered: true }));
+    this._watchPc(pc);
+    pc.createOffer()
+      .then(function (offer) { return pc.setLocalDescription(offer); })
+      .then(function () {
+        self._gatherThen(pc, function () {
+          if (!self.destroyed) {
+            self._pub({ t: "offer", from: self.myId, to: fromId,
+              sdp: pc.localDescription.sdp });
+          }
+        });
+      })
+      .catch(function () { self._peerDown(); });
   };
 
-  /* 双方通用: 挂接已建立 (或 incoming) 的 DataConnection */
-  Net.prototype._accept = function (conn) {
+  /* 房主: 收到 answer, 收尾握手 */
+  Net.prototype._onAnswer = function (msg) {
+    if (this.destroyed || !this.pc || this._answered) { return; }
+    this._answered = true;
     var self = this;
-    /* 房主: 若已有旧连接 (对方重连/刷新页面), 先关旧的保新的 */
-    if (this.role === "host" && this.conn && this.conn !== conn) {
-      try { this.conn.close(); } catch (e) { /* 忽略 */ }
+    this.pc.setRemoteDescription({ type: "answer", sdp: msg.sdp })
+      .catch(function () { self._peerDown(); });
+  };
+
+  /* 客机: 收到 offer -> 回 answer */
+  Net.prototype._onOffer = function (msg) {
+    if (this.destroyed || this.pc) { return; }
+    var self = this;
+    var pc = new RTCPeerConnection(rtcConfig());
+    this.pc = pc;
+    pc.ondatachannel = function (e) { self._bindDc(e.channel); };
+    this._watchPc(pc);
+    pc.setRemoteDescription({ type: "offer", sdp: msg.sdp })
+      .then(function () { return pc.createAnswer(); })
+      .then(function (answer) { return pc.setLocalDescription(answer); })
+      .then(function () {
+        self._gatherThen(pc, function () {
+          if (!self.destroyed) {
+            self._pub({ t: "answer", from: self.myId, to: msg.from,
+              sdp: pc.localDescription.sdp });
+          }
+        });
+      })
+      .catch(function () { self._peerDown(); });
+  };
+
+  /* 连接级失败 (ICE 失败等) -> 视为对端掉线 */
+  Net.prototype._watchPc = function (pc) {
+    var self = this;
+    pc.onconnectionstatechange = function () {
+      if (!self.destroyed && pc.connectionState === "failed") {
+        self._peerDown();
+      }
+    };
+  };
+
+  /* 非 trickle ICE: 候选收齐 (或兜底超时) 后再回调, 完整 SDP 一次发出 */
+  Net.prototype._gatherThen = function (pc, cb) {
+    var done = false;
+    var self = this;
+    function finish() {
+      if (done) { return; }
+      done = true;
+      pc.removeEventListener("icegatheringstatechange", onChange);
+      cb();
     }
-    this.conn = conn;
-    conn.on("open", function () {
-      if (self.destroyed) { conn.close(); return; }
+    function onChange() {
+      if (pc.iceGatheringState === "complete") { finish(); }
+    }
+    pc.addEventListener("icegatheringstatechange", onChange);
+    setTimeout(function () {
+      if (!self.destroyed) { finish(); }
+    }, GATHER_TIMEOUT_MS);
+  };
+
+  Net.prototype._bindDc = function (dc) {
+    var self = this;
+    this.dc = dc;
+    dc.onopen = function () {
+      if (self.destroyed) { return; }
+      clearTimeout(self._watchTimer);
+      clearTimeout(self._joinTimer);
       self.alive = true;
       self._lastSeen = Date.now();
       self._startHeartbeat();
       self.onEvent({ type: "connected" });
-    });
-    conn.on("data", function (data) {
-      if (self.destroyed || !data || typeof data !== "object") { return; }
+    };
+    dc.onmessage = function (e) {
+      if (self.destroyed) { return; }
+      var d;
+      try { d = JSON.parse(e.data); } catch (err) { return; }
+      if (!d || typeof d !== "object") { return; }
       self._lastSeen = Date.now();
-      if (data.t === "ping") { self.send({ t: "pong" }); return; }
-      if (data.t === "pong") { return; }
-      self.onMessage(data);
-    });
-    conn.on("close", function () {
-      if (!self.destroyed) {
-        self._stopHeartbeat();
-        self.onEvent({ type: "closed" });
-      }
-    });
-    conn.on("error", function () {
-      if (!self.destroyed) {
-        self._stopHeartbeat();
-        self.onEvent({ type: "closed" });
-      }
-    });
+      if (d.t === "ping") { self.send({ t: "pong" }); return; }
+      if (d.t === "pong") { return; }
+      if (d.t === "bye") { self._peerDown(); return; }
+      self.onMessage(d);
+    };
+    dc.onclose = function () { self._peerDown(); };
+    dc.onerror = function () { self._peerDown(); };
+  };
+
+  Net.prototype._peerDown = function () {
+    if (this.destroyed) { return; }
+    this._stopHeartbeat();
+    this._teardownPeer();
+    this.onEvent({ type: "closed" });
+  };
+
+  Net.prototype._teardownPeer = function () {
+    this._stopHeartbeat();
+    if (this.dc) {
+      this.dc.onclose = null;
+      this.dc.onerror = null;
+      try { this.dc.close(); } catch (e) { /* 忽略 */ }
+      this.dc = null;
+    }
+    if (this.pc) {
+      try { this.pc.close(); } catch (e) { /* 忽略 */ }
+      this.pc = null;
+    }
   };
 
   Net.prototype._startHeartbeat = function () {
@@ -216,13 +387,28 @@
     if (this._checkTimer) { clearInterval(this._checkTimer); this._checkTimer = null; }
   };
 
+  Net.prototype._onHandshakeTimeout = function () {
+    if (this.destroyed || this.isReady() || !this._everUp) { return; }
+    var noHost = this.role === "guest" && !this.pc;
+    this.onEvent({
+      type: noHost ? "join-failed" : "error",
+      message: friendlyError(noHost ? "no-host" : "webrtc")
+    });
+    this.destroy();
+  };
+
   Net.prototype.destroy = function () {
     this.destroyed = true;
-    this._stopHeartbeat();
-    if (this.conn) { try { this.conn.close(); } catch (e) { /* 忽略 */ } }
-    if (this.peer) { try { this.peer.destroy(); } catch (e) { /* 忽略 */ } }
-    this.conn = null;
-    this.peer = null;
+    clearTimeout(this._watchTimer);
+    clearTimeout(this._joinTimer);
+    this._teardownPeer();
+    if (this.client) {
+      try {
+        if (this.client.connected) { this._pub({ t: "bye", from: this.myId }); }
+        this.client.end(true);
+      } catch (e) { /* 忽略 */ }
+      this.client = null;
+    }
   };
 
   /* ---------------- LobbyUI: 联机大厅界面 ----------------
@@ -307,7 +493,7 @@
         '<div class="card-desc">输入对方给你的房间码<br>你执白后手</div></div>';
       html += '</div>';
       html += '<div class="lobby-note">联机为浏览器点对点直连 (WebRTC)，无需服务器；' +
-        '少数受限网络下可能无法建立连接，可换网络重试。</div>';
+        '仅房间号握手经由公共信令节点。少数受限网络下可能无法建立连接，可换网络重试。</div>';
     } else if (this.stage === "hosting") {
       html += '<div class="lobby-panel">';
       html += '<div class="lobby-label">房间码 · 发给好友加入</div>';
@@ -420,6 +606,6 @@
     LobbyUI: LobbyUI,
     genCode: genCode,
     CODE_LEN: CODE_LEN,
-    peerAvailable: peerAvailable
+    peerAvailable: libAvailable
   };
 })(window);

@@ -41,8 +41,10 @@ npx vercel          # 首次会引导登录并创建项目，之后 npx vercel -
   - 双人对战，或挑战内置启发式 AI（攻防棋型评分，无神经网络）
   - 人机模式下可「预测着法」（AI 建议点脉冲高亮 6 秒）、交换执子
 - **联机对战**（围棋 / 五子棋均支持，无需自己的服务器）
-  - 基于 WebRTC 点对点直连（[PeerJS](https://peerjs.com)）；建房/寻址使用
-    PeerJS 公共信令服务器，**不部署任何后端**，Vercel 纯静态托管即可联机
+  - 棋局数据经 WebRTC 点对点直传；房间号握手经公共 MQTT 信令节点
+    （[EMQX 公共 broker](https://www.emqx.com/zh/mqtt/public-mqtt-broker)，
+    首选 `broker-cn.emqx.io` 大陆节点，自动换节点重试），
+    **不部署任何后端**，Vercel 纯静态托管即可联机
   - 菜单选「联机对战」→ 创建对局得到 5 位房间码，把 **房间码或含
     `?room=XXXXX` 的链接**发给好友；好友点链接直达加入，或选「加入对局」输码
   - 房主机为权威端：完整局面（动作序列）每次变更广播，双方引擎确定性重放，
@@ -61,9 +63,10 @@ npx vercel          # 首次会引导登录并创建项目，之后 npx vercel -
 
 ### 联机说明与限制
 
-- 棋局数据在两位玩家浏览器之间直传，只有「房间号寻址」短暂经过 PeerJS
-  公共信令服务器（`0.peerjs.com`），本页面不经过也不存储任何对局数据。
-- 需要双方都能访问公网信令服务器与 Google/Cloudflare STUN 服务。
+- 棋局数据在两位玩家浏览器之间直传，只有「房间号寻址」的几次 SDP 交换
+  短暂经过公共 MQTT 节点（EMQX `broker-cn.emqx.io` / `broker.emqx.io`，
+  均不可用时回退 Mosquitto 测试节点），本页面不经过也不存储任何对局数据。
+- STUN 使用小米（`stun.miwifi.com`）与 Cloudflare 公共服务（不依赖 Google）。
   极少数对称 NAT / 受限网络可能无法建立点对点连接（界面会明确报错），
   换个网络（如改用手机热点）通常即可解决。
 - `file://` 本地打开时联机同样可用，但「复制链接」不可用，请直接发房间码。
@@ -81,7 +84,7 @@ frontend_html/
 │   ├── gomoku_ai.js  五子棋启发式 AI（纯算法，无模型）
 │   ├── sgf.js        SGF 保存 / 下载 / 主变解析
 │   ├── ui.js         棋盘 Canvas 绘制 + 主菜单 + 确认框
-│   ├── online.js     联机对战（PeerJS 点对点封装 + 联机大厅界面）
+│   ├── online.js     联机对战（MQTT 信令 + WebRTC 点对点封装 + 联机大厅界面）
 │   └── main.js       对局流程控制器（事件 / 侧栏 / 复盘 / 键盘 / 联机同步）
 ├── vercel.json       Vercel 部署配置（缓存策略 / cleanUrls）
 └── README.md
