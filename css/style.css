@@ -157,6 +157,131 @@ body {
 
 .badge.amber { background: var(--amber); }
 
+.badge.teal { background: #3d7f8c; }
+
+/* ---------------- 联机大厅 ---------------- */
+
+#lobby-view {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: auto;
+  color: #f1eadd;
+  background:
+    radial-gradient(circle at 16% 18%, rgba(110, 190, 200, 0.10), transparent 34%),
+    radial-gradient(circle at 86% 84%, rgba(230, 176, 110, 0.12), transparent 30%),
+    linear-gradient(var(--bg-top), var(--bg-bottom));
+}
+
+.lobby-note {
+  max-width: 640px;
+  padding: 0 24px 28px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.8;
+  color: #8d8172;
+}
+
+.lobby-panel {
+  margin: auto;
+  padding: 40px 44px;
+  min-width: min(420px, 86vw);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  background: rgba(247, 241, 230, 0.05);
+  border: 1px solid #544c40;
+  border-radius: 18px;
+}
+
+.lobby-label {
+  font-size: 14px;
+  letter-spacing: 0.2em;
+  color: #a89b88;
+}
+
+.lobby-code {
+  font-family: ui-monospace, "SF Mono", Consolas, Menlo, monospace;
+  font-size: 52px;
+  font-weight: 700;
+  letter-spacing: 0.24em;
+  text-indent: 0.24em;
+  padding: 10px 26px;
+  border-radius: 14px;
+  background: rgba(201, 168, 106, 0.12);
+  border: 1px solid rgba(201, 168, 106, 0.4);
+  color: var(--gold);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.lobby-input {
+  width: 240px;
+  height: 56px;
+  text-align: center;
+  font-family: ui-monospace, "SF Mono", Consolas, Menlo, monospace;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  border-radius: 12px;
+  border: 1px solid #6a5f50;
+  background: rgba(20, 18, 16, 0.6);
+  color: #f1eadd;
+  outline: none;
+}
+
+.lobby-input:focus { border-color: var(--gold); }
+
+.lobby-status { font-size: 15px; color: #bfb3a1; }
+
+.lobby-error { font-size: 14px; color: #d98a7a; }
+
+.lobby-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.lobby-actions button {
+  min-width: 110px;
+  height: 40px;
+  border-radius: 9px;
+  border: 1px solid #6a5f50;
+  background: rgba(52, 47, 42, 0.9);
+  color: #f1eadd;
+  font-size: 15px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.lobby-actions button:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.lobby-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 等待指示动画 (等待对手加入 / 正在连接) */
+.lobby-status .dots i {
+  font-style: normal;
+  margin-left: 3px;
+  animation: lobby-dots 1.35s infinite;
+}
+
+.lobby-status .dots i:nth-child(2) { animation-delay: 0.22s; }
+.lobby-status .dots i:nth-child(3) { animation-delay: 0.44s; }
+
+@keyframes lobby-dots {
+  0%, 100% { opacity: 0.15; }
+  40% { opacity: 1; }
+}
+
 .menu-footer {
   display: flex;
   justify-content: center;
@@ -314,6 +439,47 @@ kbd {
   color: var(--panel-muted);
   flex: none;
 }
+
+/* 联机状态胶囊 (侧栏, 玩家卡片下方) */
+.net-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.net-pill .np-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.net-pill.ok {
+  background: rgba(82, 118, 96, 0.16);
+  border: 1px solid rgba(82, 118, 96, 0.45);
+  color: #3f6350;
+}
+
+.net-pill.ok .np-dot { background: #4d8a66; }
+
+.net-pill.warn {
+  background: rgba(190, 150, 60, 0.16);
+  border: 1px solid rgba(190, 150, 60, 0.5);
+  color: #8a6a25;
+}
+
+.net-pill.warn .np-dot { background: #c79b3f; }
+
+.net-pill.bad {
+  background: rgba(178, 70, 54, 0.14);
+  border: 1px solid rgba(178, 70, 54, 0.5);
+  color: #9c4436;
+}
+
+.net-pill.bad .np-dot { background: #b24636; }
 
 .status-strip {
   display: flex;

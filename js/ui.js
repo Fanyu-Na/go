@@ -505,16 +505,25 @@
       ];
     }
     if (this.game === "go") {
-      return [{
-        id: "pvp", label: "双人对战",
-        desc: "黑白轮流落子 · 双停一手后自动数子",
-        pattern: this.size >= 19 ? "go19" : (this.size >= 13 ? "go13" : "go9"),
-        previewSize: this.size
-      }];
+      var goPattern = this.size >= 19 ? "go19" : (this.size >= 13 ? "go13" : "go9");
+      return [
+        {
+          id: "pvp", label: "双人对战",
+          desc: "黑白轮流落子 · 双停一手后自动数子",
+          pattern: goPattern, previewSize: this.size
+        },
+        {
+          id: "online", label: "联机对战",
+          desc: "与好友网络远程对局 · 生成房间码分享",
+          badge: { text: "联机", teal: true }, pattern: goPattern,
+          previewSize: this.size
+        }
+      ];
     }
     return [
       { id: "pvp", label: "双人对战", desc: "两人轮流落子 · 先连成五子者胜", pattern: "gomoku", previewSize: 15 },
-      { id: "ai", label: "人机对战", desc: "对局内置启发式 AI · 你执黑先行", badge: { text: "AI", amber: true }, pattern: "gomoku", previewSize: 15 }
+      { id: "ai", label: "人机对战", desc: "对局内置启发式 AI · 你执黑先行", badge: { text: "AI", amber: true }, pattern: "gomoku", previewSize: 15 },
+      { id: "online", label: "联机对战", desc: "与好友网络远程对局 · 生成房间码分享", badge: { text: "联机", teal: true }, pattern: "gomoku", previewSize: 15 }
     ];
   };
 
@@ -669,6 +678,7 @@
     coordText: coordText,
     starPoints: starPoints,
     formatDuration: formatDuration,
+    drawPreview: drawMiniBoard,
     COL_LETTERS: COL_LETTERS
   };
 })(window);

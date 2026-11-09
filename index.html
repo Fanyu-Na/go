@@ -11,6 +11,9 @@
   <!-- 主菜单: 选择游戏 -> 棋盘路数 -> 对局模式 (由 ui.js 渲染) -->
   <section id="menu-view" class="view"></section>
 
+  <!-- 联机大厅: 创建房间 / 加入房间 (由 online.js 渲染) -->
+  <section id="lobby-view" class="view hidden"></section>
+
   <!-- 对局视图: 左侧棋盘画布 + 右侧信息栏 -->
   <section id="game-view" class="view hidden">
     <div id="board-wrap"><canvas id="board"></canvas></div>
@@ -28,13 +31,18 @@
 <!--
   纯静态页面, 直接双击打开即可; 全部脚本为普通 (非 module) 脚本,
   按 file:// 协议也能正常加载. 加载顺序不可调换.
+  联机功能使用 PeerJS 公共信令 (CDN), 主源失败自动回退备用源;
+  若两个 CDN 都不可达, 本地双人/人机对局不受影响, 仅联机入口提示错误.
 -->
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"
+  onerror="this.onerror=null;var s=document.createElement('script');s.src='https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';document.head.appendChild(s);"></script>
 <script src="js/sound.js"></script>
 <script src="js/go_env.js"></script>
 <script src="js/gomoku_env.js"></script>
 <script src="js/gomoku_ai.js"></script>
 <script src="js/sgf.js"></script>
 <script src="js/ui.js"></script>
+<script src="js/online.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>
