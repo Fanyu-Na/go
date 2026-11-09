@@ -2,7 +2,7 @@
    op = join | poll | move | resign | req | ack | close
    服务器为权威端: 每次落子都重放完整动作序列, 「轮到谁 / 是否合法 /
    终局与否」全部由引擎判定; 双方仅凭 token 认席位, 刷新页面可恢复. */
-const lib = require("../_lib.js");
+import * as lib from "../_lib.js";
 
 async function touchPresence(code, color, now) {
   const p = await lib.loadPresence(code);
@@ -17,7 +17,7 @@ async function okState(res, state, presence) {
   });
 }
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   try {
     const code = String((req.query && req.query.code) || "").toUpperCase();
     if (!/^[A-Z0-9]{5}$/.test(code)) {
@@ -167,8 +167,7 @@ module.exports = async (req, res) => {
         return lib.json(res, 400, { error: "未知操作" });
     }
   } catch (e) {
-    console.error("[api/room/" + code + "] 操作失败:",
-      e && e.message ? e.message : e);
+    console.error("[api/room] 操作失败:", e && e.message ? e.message : e);
     lib.json(res, 500, { error: (e && e.message) || "服务器错误" });
   }
-};
+}

@@ -1,9 +1,9 @@
 /* POST /api/room   body: {game: "go"|"gomoku", size, komi}
    -> {code, token, color}
    创建房间: 生成唯一 5 位房间码并把初始状态写入 Vercel Blob. */
-const lib = require("./_lib.js");
+import * as lib from "./_lib.js";
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   try {
     if (req.method !== "POST") { return lib.json(res, 405, { error: "Method Not Allowed" }); }
     const body = lib.parseBody(req);
@@ -49,4 +49,4 @@ module.exports = async (req, res) => {
     console.error("[api/room] 创建房间失败:", e && e.message ? e.message : e);
     lib.json(res, 500, { error: (e && e.message) || "创建房间失败" });
   }
-};
+}

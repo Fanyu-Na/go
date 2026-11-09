@@ -1,16 +1,15 @@
 /* 联机中继共享逻辑 (api/ 下以 _ 开头的文件不会暴露为 HTTP 接口).
-   架构: 房间状态整体存 Vercel Blob (强一致), 着法序列 + 协商元数据;
-   在线心跳存独立的 .presence.json, 避免高频心跳写入与落子写入互相覆盖.
-   服务器用与前端完全相同的规则引擎 (js/go_env.js / js/gomoku_env.js,
-   均已兼容 Node require) 重放动作序列来校验着法, 天然防作弊. */
+   注意: package.json 声明了 "type": "module", 本目录全部按 ESM 解析;
+   js/go_env.js、js/gomoku_env.js 是无 import/export 的经典脚本,
+   被当作 ESM 导入时同样会执行并把引擎挂到 globalThis (浏览器行为一致).
+   房间状态整体存 Vercel Blob (强一致); 在线心跳存独立的 .presence.json,
+   避免高频心跳写入与落子写入互相覆盖. 服务器用与前端同一套引擎重放
+   动作序列校验着法, 天然防作弊. */
 
-"use strict";
-
-const crypto = require("crypto");
-const { put, get, del } = require("@vercel/blob");
-
-require("../js/go_env.js");
-require("../js/gomoku_env.js");
+import crypto from "node:crypto";
+import { put, get, del } from "@vercel/blob";
+import "../js/go_env.js";
+import "../js/gomoku_env.js";
 
 const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";   // 去掉 0/O/1/I/L 易混字符
 const GO_SIZES = [9, 13, 19];
@@ -132,21 +131,9 @@ function json(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
-module.exports = {
-  ALPHABET: ALPHABET,
-  GO_SIZES: GO_SIZES,
-  GO_KOMI: GO_KOMI,
-  GOMOKU_SIZE: GOMOKU_SIZE,
-  genCode: genCode,
-  genToken: genToken,
-  newEnv: newEnv,
-  replay: replay,
-  loadRoom: loadRoom,
-  loadPresence: loadPresence,
-  saveRoom: saveRoom,
-  savePresence: savePresence,
-  delRoom: delRoom,
-  publicState: publicState,
-  parseBody: parseBody,
-  json: json
+export {
+  ALPHABET, GO_SIZES, GO_KOMI, GOMOKU_SIZE,
+  genCode, genToken, newEnv, replay,
+  loadRoom, loadPresence, saveRoom, savePresence, delRoom,
+  publicState, parseBody, json
 };
