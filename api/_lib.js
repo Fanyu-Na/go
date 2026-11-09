@@ -47,6 +47,7 @@ async function putBlob(pathname, body) {
       return await put(pathname, body, {
         access: order[i],
         addRandomSuffix: false,
+        allowOverwrite: true,      // 棋局/心跳要反复覆盖同一路径
         contentType: "application/json"
       });
     } catch (e) {
