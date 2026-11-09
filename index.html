@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>围棋 · 五子棋</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 主菜单: 选择游戏 -> 棋盘路数 -> 对局模式 (由 ui.js 渲染) -->
+  <section id="menu-view" class="view"></section>
+
+  <!-- 对局视图: 左侧棋盘画布 + 右侧信息栏 -->
+  <section id="game-view" class="view hidden">
+    <div id="board-wrap"><canvas id="board"></canvas></div>
+    <aside id="sidebar"></aside>
+  </section>
+
+</div>
+
+<!-- SGF 载入用的隐藏文件选择框 -->
+<input type="file" id="sgf-input" accept=".sgf,text/plain" hidden>
+
+<!-- 模态确认对话框挂载点 -->
+<div id="modal-root"></div>
+
+<!--
+  纯静态页面, 直接双击打开即可; 全部脚本为普通 (非 module) 脚本,
+  按 file:// 协议也能正常加载. 加载顺序不可调换.
+-->
+<script src="js/sound.js"></script>
+<script src="js/go_env.js"></script>
+<script src="js/gomoku_env.js"></script>
+<script src="js/gomoku_ai.js"></script>
+<script src="js/sgf.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
