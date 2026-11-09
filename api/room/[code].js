@@ -167,6 +167,8 @@ module.exports = async (req, res) => {
         return lib.json(res, 400, { error: "未知操作" });
     }
   } catch (e) {
+    console.error("[api/room/" + code + "] 操作失败:",
+      e && e.message ? e.message : e);
     lib.json(res, 500, { error: (e && e.message) || "服务器错误" });
   }
 };

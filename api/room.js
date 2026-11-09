@@ -46,6 +46,7 @@ module.exports = async (req, res) => {
     await lib.savePresence(code, { blackSeen: now });
     lib.json(res, 200, { code: code, token: state.blackToken, color: 1 });
   } catch (e) {
+    console.error("[api/room] 创建房间失败:", e && e.message ? e.message : e);
     lib.json(res, 500, { error: (e && e.message) || "创建房间失败" });
   }
 };
