@@ -35,9 +35,29 @@ function checkBlobConfigured() {
   }
 }
 
-/* Blob Store 的访问类型需与创建时一致 (Private 默认).
-   若你在 Vercel 里建的是 Public Store, 设环境变量 BLOB_ACCESS=public 即可. */
-const BLOB_ACCESS = process.env.BLOB_ACCESS === "public" ? "public" : "private";
+/* Blob Store 的访问类型: 初始猜测取环境变量 BLOB_ACCESS (默认 private),
+   若与 Store 实际配置不符会自动切换并记住 —— 公有/私有 Store 都能工作. */
+let _blobAccess = process.env.BLOB_ACCESS === "public" ? "public" : "private";
+
+async function putBlob(pathname, body) {
+  const order = _blobAccess === "public" ? ["public", "private"] : ["private", "public"];
+  let lastErr = null;
+  for (let i = 0; i < order.length; i++) {
+    try {
+      return await put(pathname, body, {
+        access: order[i],
+        addRandomSuffix: false,
+        contentType: "application/json"
+      });
+    } catch (e) {
+      lastErr = e;
+      /* 仅当是「访问类型不匹配」时才换另一种重试; 其他错误原样抛出 */
+      if (!/access/i.test(String(e && e.message || ""))) { throw e; }
+    }
+  }
+  _blobAccess = order[0];   // 两种都失败则还原猜测, 下次再试
+  throw lastErr;
+}
 
 function newEnv(meta) {
   if (meta.game === "go") {
@@ -66,15 +86,37 @@ async function readText(blob) {
   return String(blob && blob.body != null ? blob.body : "");
 }
 
+/* 兼容不同版本的 @vercel/blob: 新版要求 get() 携带 options.
+   依次尝试: 无参数 -> 按 put 成功时记住的访问类型 -> 另一种类型.
+   「形态不符」类错误才换下一种; 房间不存在 (BlobNotFoundError) 直接抛. */
+async function getBlob(pathname) {
+  const other = _blobAccess === "public" ? "private" : "public";
+  const tries = [
+    function () { return get(pathname); },
+    function () { return get(pathname, { access: _blobAccess }); },
+    function () { return get(pathname, { access: other }); }
+  ];
+  let lastErr = null;
+  for (let i = 0; i < tries.length; i++) {
+    try {
+      return await tries[i]();
+    } catch (e) {
+      lastErr = e;
+      if (!/missing options|access/i.test(String(e && e.message || ""))) { throw e; }
+    }
+  }
+  throw lastErr;
+}
+
 async function loadRoom(code) {
   checkBlobConfigured();
-  const blob = await get(roomPath(code));
+  const blob = await getBlob(roomPath(code));
   return JSON.parse(await readText(blob));
 }
 
 async function loadPresence(code) {
   try {
-    const blob = await get(presencePath(code));
+    const blob = await getBlob(presencePath(code));
     const p = JSON.parse(await readText(blob));
     return p && typeof p === "object" ? p : {};
   } catch (e) {
@@ -84,19 +126,11 @@ async function loadPresence(code) {
 
 async function saveRoom(state) {
   checkBlobConfigured();
-  await put(roomPath(state.code), JSON.stringify(state), {
-    access: BLOB_ACCESS,
-    addRandomSuffix: false,
-    contentType: "application/json"
-  });
+  await putBlob(roomPath(state.code), JSON.stringify(state));
 }
 
 async function savePresence(code, presence) {
-  await put(presencePath(code), JSON.stringify(presence), {
-    access: BLOB_ACCESS,
-    addRandomSuffix: false,
-    contentType: "application/json"
-  });
+  await putBlob(presencePath(code), JSON.stringify(presence));
 }
 
 async function delRoom(code) {
